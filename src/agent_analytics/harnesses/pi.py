@@ -56,7 +56,7 @@ def _header(path: Path) -> dict:
     return first if isinstance(first, dict) and first.get("type") == "session" else {}
 
 
-def _session_id(path: Path) -> str:
+def session_id_from_path(path: Path) -> str:
     # Prefer the header id; fall back to the part of the filename after "<timestamp>_".
     return _header(path).get("id") or path.stem.rsplit("_", 1)[-1]
 
@@ -65,7 +65,7 @@ def find_latest_session() -> str | None:
     files = _transcripts()
     if not files:
         return None
-    return _session_id(max(files, key=lambda p: p.stat().st_mtime))
+    return session_id_from_path(max(files, key=lambda p: p.stat().st_mtime))
 
 
 def find_transcript(session_id: str) -> Path:
@@ -104,8 +104,10 @@ def _add_usage(tokens: Counter, cost: Counter, usage) -> None:
             cost[dst] += c.get(src) or 0
 
 
-def collect(session_id: str) -> dict:
-    path = find_transcript(session_id)
+def collect(session_id: str, transcript: Path | None = None) -> dict:
+    path = Path(transcript) if transcript else find_transcript(session_id)
+    if not path.is_file():
+        raise SessionNotFound(f"transcript not found: {path}")
 
     timestamps: list[datetime] = []
     tool_calls: Counter[str] = Counter()

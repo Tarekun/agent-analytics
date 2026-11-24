@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "agent-analytics --hook-input --quiet",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}

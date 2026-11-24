@@ -39,6 +39,10 @@ def find_latest_session() -> str | None:
     return max(files, key=lambda p: p.stat().st_mtime).stem
 
 
+def session_id_from_path(path: Path) -> str:
+    return Path(path).stem
+
+
 def find_transcript(session_id: str) -> Path:
     for p in _transcripts():
         if p.stem == session_id:
@@ -58,8 +62,10 @@ def _is_human_prompt(entry: dict) -> bool:
     return False
 
 
-def collect(session_id: str) -> dict:
-    path = find_transcript(session_id)
+def collect(session_id: str, transcript: Path | None = None) -> dict:
+    path = Path(transcript) if transcript else find_transcript(session_id)
+    if not path.is_file():
+        raise SessionNotFound(f"transcript not found: {path}")
 
     timestamps: list[datetime] = []
     tool_calls: Counter[str] = Counter()
