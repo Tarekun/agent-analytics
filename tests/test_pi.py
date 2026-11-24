@@ -22,6 +22,8 @@ LINES = [
     {"type": "session", "version": 3, "id": SID, "timestamp": "2026-01-01T10:00:00.000Z", "cwd": "/proj"},
     {"type": "model_change", "id": "a1", "parentId": None, "timestamp": "2026-01-01T10:00:00.500Z",
      "provider": "anthropic", "modelId": "claude-x"},
+    {"type": "thinking_level_change", "id": "a1b", "parentId": "a1", "timestamp": "2026-01-01T10:00:00.600Z",
+     "thinkingLevel": "medium"},
     {"type": "message", "id": "a2", "parentId": "a1", "timestamp": "2026-01-01T10:00:01.000Z",
      "message": {"role": "user", "content": "fix the bug", "timestamp": 1767261601000}},
     {"type": "message", "id": "a3", "parentId": "a2", "timestamp": "2026-01-01T10:00:05.000Z",
@@ -34,6 +36,7 @@ LINES = [
                  "usage": usage(7, 3, total_cost=0.001)}},
     {"type": "message", "id": "a5", "parentId": "a4", "timestamp": "2026-01-01T10:00:09.000Z",
      "message": {"role": "assistant", "provider": "anthropic", "model": "claude-x", "stopReason": "stop",
+                 "thinkingLevel": "high",
                  "content": [{"type": "text", "text": "done"}], "usage": usage(10, 5, total_cost=0.002)}},
     {"type": "compaction", "id": "a6", "parentId": "a5", "timestamp": "2026-01-01T10:00:20.000Z",
      "summary": "...", "firstKeptEntryId": "a5", "tokensBefore": 500, "usage": usage(40, 10, total_cost=0.004)},
@@ -84,6 +87,8 @@ def test_pi_latest_session(pi_env, tmp_path, capsys):
     assert rec["assistant_messages"] == 2
     assert rec["tool_calls"] == {"bash": 1} and rec["tool_errors"] == 1
     assert rec["models"] == {"claude-x": 2} and rec["providers"] == {"anthropic": 2}
+    assert rec["effort"] == {"medium": 1, "high": 1}
+    assert rec["instructions"] is None and rec["skills"] is None and rec["mcp_servers"] is None
     assert rec["tokens"] == {"input": 110, "output": 25, "cache_read": 50, "cache_creation": 0}
     assert rec["cost"]["total"] == pytest.approx(0.012)
     assert rec["aux_usage"]["tokens"]["input"] == 47  # tool result (7) + compaction (40)

@@ -9,14 +9,19 @@ from __future__ import annotations
 
 import json
 import os
-from collections import Counter
+import re
+from collections import Counter, defaultdict
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
 from agent_analytics.errors import SessionNotFound
-from agent_analytics.record import new_record, parse_ts, time_fields
+from agent_analytics.record import content_hash, new_record, parse_ts, time_fields
 
 NAME = "claude-code"
+
+SKILL_LOAD_PREFIX = "Base directory for this skill: "
+ARGUMENTS_SUFFIX = re.compile(r"\n+ARGUMENTS: .*\Z", re.DOTALL)
 
 
 def projects_dir() -> Path:
@@ -46,6 +51,38 @@ def find_transcript(session_id: str) -> Path:
     raise SessionNotFound(f"no Claude Code transcript for session {session_id!r} under {projects_dir()}")
 
 
+def _text(content) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text")
+    return ""
+
+
+def _skill_load(entry: dict) -> tuple[str, str] | None:
+    """(skill name, hash of the skill text the model received) for a skill-load message.
+
+    Claude Code loads a skill, from a `Skill` tool call or a typed /<skill>, as a
+    meta user message: "Base directory for this skill: <dir>\\n<skill text>[\\n\\nARGUMENTS: ...]".
+    The arguments are removed so the hash changes only when the skill changes.
+    """
+    if not entry.get("isMeta"):
+        return None
+    text = _text((entry.get("message") or {}).get("content"))
+    if not text.startswith(SKILL_LOAD_PREFIX):
+        return None
+    first_line, _, body = text.partition("\n")
+    name = Path(first_line.removeprefix(SKILL_LOAD_PREFIX).strip()).name
+    body = ARGUMENTS_SUFFIX.sub("", body).strip()
+    return name, content_hash(body)
+
+
+def _mcp_server(tool_name: str) -> tuple[str, str] | None:
+    """Split "mcp__<server>__<tool>" into (server, tool)."""
+    parts = tool_name.split("__", 2)
+    return (parts[1], parts[2]) if len(parts) == 3 and parts[0] == "mcp" else None
+
+
 def _is_human_prompt(entry: dict) -> bool:
     """A user entry typed by a person (not a tool result or meta message)."""
     if entry.get("isMeta") or entry.get("isSidechain"):
@@ -58,89 +95,154 @@ def _is_human_prompt(entry: dict) -> bool:
     return False
 
 
-def collect(session_id: str) -> dict:
-    path = find_transcript(session_id)
-
-    timestamps: list[datetime] = []
-    tool_calls: Counter[str] = Counter()
-    models: Counter[str] = Counter()
-    tokens = Counter(input=0, output=0, cache_read=0, cache_creation=0)
-    seen_message_ids: set[str] = set()
-    user_prompts = 0
-    assistant_turns = 0
-    tool_errors = 0
-    meta: dict = {}
-
+def _read_entries(path: Path):
     with path.open(encoding="utf-8") as fh:
         for line in fh:
             try:
                 entry = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            etype = entry.get("type")
+            if isinstance(entry, dict):
+                yield entry
 
-            if etype == "ai-title":
-                meta["title"] = entry.get("aiTitle")
-                continue
-            if etype not in ("user", "assistant"):
-                continue
 
+def _add_unique(items: list[str], item: str) -> None:
+    if item not in items:
+        items.append(item)
+
+
+@dataclass
+class _Session:
+    """Accumulates one transcript, entry by entry."""
+
+    meta: dict = field(default_factory=dict)
+    timestamps: list[datetime] = field(default_factory=list)
+    user_prompts: int = 0
+    assistant_messages: int = 0
+    tool_errors: int = 0
+    tool_calls: Counter = field(default_factory=Counter)
+    models: Counter = field(default_factory=Counter)
+    effort: Counter = field(default_factory=Counter)
+    tokens: Counter = field(default_factory=lambda: Counter(input=0, output=0, cache_read=0, cache_creation=0))
+    instructions: dict[str, list[str]] = field(default_factory=lambda: defaultdict(list))
+    skills: dict[str, dict] = field(default_factory=dict)
+    mcp_calls: dict[str, Counter] = field(default_factory=lambda: defaultdict(Counter))  # server -> {tool: calls}
+    mcp_definitions: dict[str, str] = field(default_factory=dict)  # full tool name -> definition hash
+    seen_message_ids: set[str] = field(default_factory=set)
+
+    def add(self, entry: dict) -> None:
+        etype = entry.get("type")
+        if etype == "ai-title":
+            self.meta["title"] = entry.get("aiTitle")
+        elif etype == "attachment":
+            self._attachment(entry.get("attachment") or {})
+        elif etype == "api-request-shape":
+            self._request_shape(entry.get("shape") or {})
+        elif etype in ("user", "assistant"):
             for key in ("cwd", "gitBranch", "version", "entrypoint"):
                 if entry.get(key):
-                    meta[key] = entry[key]
+                    self.meta[key] = entry[key]
             if ts := parse_ts(entry.get("timestamp")):
-                timestamps.append(ts)
-
-            message = entry.get("message") or {}
-            content = message.get("content")
-
+                self.timestamps.append(ts)
             if etype == "user":
-                if _is_human_prompt(entry):
-                    user_prompts += 1
-                if isinstance(content, list):
-                    tool_errors += sum(
-                        1 for b in content
-                        if isinstance(b, dict) and b.get("type") == "tool_result" and b.get("is_error")
-                    )
-                continue
+                self._user(entry)
+            else:
+                self._assistant(entry)
 
-            # assistant: one API response may be split across several entries
-            # sharing the same message id (one per content block) and repeating
-            # the same usage block, so count usage once per message id.
-            if isinstance(content, list):
-                for block in content:
-                    if isinstance(block, dict) and block.get("type") == "tool_use":
-                        tool_calls[block.get("name", "?")] += 1
+    def _attachment(self, attachment: dict) -> None:
+        if attachment.get("type") == "instructions":
+            for f in attachment.get("files") or []:
+                if f.get("path"):
+                    _add_unique(self.instructions[f["path"]], content_hash(f.get("content") or ""))
 
-            msg_id = message.get("id") or entry.get("requestId") or entry.get("uuid")
-            if msg_id in seen_message_ids:
-                continue
-            seen_message_ids.add(msg_id)
-            assistant_turns += 1
-            if model := message.get("model"):
-                models[model] += 1
-            usage = message.get("usage") or {}
-            tokens["input"] += usage.get("input_tokens", 0) or 0
-            tokens["output"] += usage.get("output_tokens", 0) or 0
-            tokens["cache_read"] += usage.get("cache_read_input_tokens", 0) or 0
-            tokens["cache_creation"] += usage.get("cache_creation_input_tokens", 0) or 0
+    def _request_shape(self, shape: dict) -> None:
+        # The tool definitions sent to the model. MCP tools appear here once loaded.
+        for tool in shape.get("tools") or []:
+            name = tool.get("name") or ""
+            if _mcp_server(name):
+                definition = {k: tool.get(k) for k in ("name", "description", "input_schema")}
+                self.mcp_definitions[name] = content_hash(definition)
+
+    def _user(self, entry: dict) -> None:
+        if _is_human_prompt(entry):
+            self.user_prompts += 1
+        if loaded := _skill_load(entry):
+            name, skill_hash = loaded
+            skill = self.skills.setdefault(name, {"hashes": [], "invocations": 0})
+            skill["invocations"] += 1
+            _add_unique(skill["hashes"], skill_hash)
+        content = (entry.get("message") or {}).get("content")
+        if isinstance(content, list):
+            self.tool_errors += sum(
+                1 for b in content
+                if isinstance(b, dict) and b.get("type") == "tool_result" and b.get("is_error")
+            )
+
+    def _assistant(self, entry: dict) -> None:
+        message = entry.get("message") or {}
+        for block in message.get("content") or []:
+            if isinstance(block, dict) and block.get("type") == "tool_use":
+                name = block.get("name", "?")
+                self.tool_calls[name] += 1
+                if mcp := _mcp_server(name):
+                    server, tool = mcp
+                    self.mcp_calls[server][tool] += 1
+
+        # One API response may be split across several entries that share the
+        # same message id (one per content block) and repeat the same usage and
+        # metadata, so count those once per message id.
+        msg_id = message.get("id") or entry.get("requestId") or entry.get("uuid")
+        if msg_id in self.seen_message_ids:
+            return
+        self.seen_message_ids.add(msg_id)
+        self.assistant_messages += 1
+        if model := message.get("model"):
+            self.models[model] += 1
+        if level := entry.get("effort"):
+            self.effort[level] += 1
+        usage = message.get("usage") or {}
+        self.tokens["input"] += usage.get("input_tokens") or 0
+        self.tokens["output"] += usage.get("output_tokens") or 0
+        self.tokens["cache_read"] += usage.get("cache_read_input_tokens") or 0
+        self.tokens["cache_creation"] += usage.get("cache_creation_input_tokens") or 0
+
+    def mcp_servers(self) -> dict:
+        return {
+            server: {
+                "calls": sum(tools.values()),
+                "tools": {tool: self.mcp_definitions.get(f"mcp__{server}__{tool}") for tool in sorted(tools)},
+            }
+            for server, tools in sorted(self.mcp_calls.items())
+        }
+
+
+def collect(session_id: str) -> dict:
+    path = find_transcript(session_id)
+
+    s = _Session()
+    for entry in _read_entries(path):
+        s.add(entry)
 
     return new_record(
         session_id=session_id,
         harness=NAME,
         transcript_path=str(path),
-        title=meta.get("title"),
-        cwd=meta.get("cwd"),
-        git_branch=meta.get("gitBranch"),
-        harness_version=meta.get("version"),
-        harness_version_source="transcript" if meta.get("version") else None,
-        entrypoint=meta.get("entrypoint"),
-        **time_fields(timestamps),
-        user_prompts=user_prompts,
-        assistant_messages=assistant_turns,
-        tool_calls_total=sum(tool_calls.values()),
-        tool_calls=dict(tool_calls.most_common()),
-        tool_errors=tool_errors,
-        models=dict(models.most_common()),
-        tokens=dict(tokens),
+        title=s.meta.get("title"),
+        cwd=s.meta.get("cwd"),
+        git_branch=s.meta.get("gitBranch"),
+        harness_version=s.meta.get("version"),
+        harness_version_source="transcript" if s.meta.get("version") else None,
+        entrypoint=s.meta.get("entrypoint"),
+        **time_fields(s.timestamps),
+        user_prompts=s.user_prompts,
+        assistant_messages=s.assistant_messages,
+        tool_calls_total=sum(s.tool_calls.values()),
+        tool_calls=dict(s.tool_calls.most_common()),
+        tool_errors=s.tool_errors,
+        models=dict(s.models.most_common()),
+        effort=dict(s.effort.most_common()),
+        instructions=dict(s.instructions),
+        skills=dict(sorted(s.skills.items())),
+        mcp_servers=s.mcp_servers(),
+        tokens=dict(s.tokens),
     )
