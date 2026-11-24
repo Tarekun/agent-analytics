@@ -2,7 +2,7 @@
 
 Each harness module exposes:
   - find_latest_session() -> str | None
-  - collect(session_id: str) -> dict   (raises SessionNotFound)
+  - collect(session_id: str) -> record.SessionRecord   (raises SessionNotFound)
 """
 
 from types import ModuleType

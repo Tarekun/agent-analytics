@@ -42,11 +42,15 @@ from agent_analytics.errors import SessionNotFound
 from agent_analytics.record import (
     add_unique,
     content_hash,
+    AuxUsage,
+    SessionRecord,
+    SkillUsage,
     mcp_servers_field,
-    new_record,
     parse_ts,
     split_mcp_tool,
     time_fields,
+    to_cost,
+    to_tokens,
     tool_definition_hash,
 )
 
@@ -170,7 +174,7 @@ class _Session:
     instructions: dict[str, list[str]] = field(default_factory=lambda: defaultdict(list))
     available_skills: dict[str, str] = field(default_factory=dict)  # SKILL.md path -> skill name
     skill_reads: dict[str, str] = field(default_factory=dict)  # read tool call id -> skill name
-    skills: dict[str, dict] = field(default_factory=dict)
+    skills: dict[str, SkillUsage] = field(default_factory=dict)
     mcp_calls: dict[str, Counter] = field(default_factory=lambda: defaultdict(Counter))  # server -> {tool: calls}
     mcp_definitions: dict[str, str] = field(default_factory=dict)  # full tool name -> definition hash
 
@@ -217,7 +221,7 @@ class _Session:
                 self.mcp_definitions[name] = tool_definition_hash(name, tool.get("description"), tool.get("parameters"))
 
     def _load_skill(self, name: str, text: str) -> None:
-        skill = self.skills.setdefault(name, {"hashes": [], "invocations": 0})
+        skill = self.skills.setdefault(name, SkillUsage(hashes=[], invocations=0))
         skill["invocations"] += 1
         add_unique(skill["hashes"], _skill_hash(text))
 
@@ -240,8 +244,9 @@ class _Session:
                 name = block.get("name", "?")
                 self.tool_calls[name] += 1
                 self._count_mcp(name)
-                if name == "read" and (skill := self._read_skill(block.get("arguments"))):
-                    self.skill_reads[block.get("id")] = skill
+                call_id = block.get("id")
+                if name == "read" and call_id and (skill := self._read_skill(block.get("arguments"))):
+                    self.skill_reads[call_id] = skill
         _add_usage(self.tokens, self.cost, msg.get("usage"))
 
     def _read_skill(self, args) -> str | None:
@@ -261,7 +266,7 @@ class _Session:
     def _tool_result(self, msg: dict) -> None:
         if msg.get("isError"):
             self.tool_errors += 1
-        elif skill := self.skill_reads.pop(msg.get("toolCallId"), None):
+        elif skill := self.skill_reads.pop(msg.get("toolCallId") or "", None):
             self._load_skill(skill, _text(msg.get("content")))
         for call in msg.get("nestedCalls") or []:
             if isinstance(call, dict):
@@ -275,7 +280,7 @@ class _Session:
             self.mcp_calls[server][tool] += 1
 
 
-def collect(session_id: str) -> dict:
+def collect(session_id: str) -> SessionRecord:
     path = find_transcript(session_id)
 
     s = _Session()
@@ -292,7 +297,7 @@ def collect(session_id: str) -> dict:
     # sessions written before Pi recorded them do not have.
     config_known = s.has_system_prompt
     version = installed_version()
-    return new_record(
+    return SessionRecord(
         session_id=s.header.get("id") or session_id,
         harness=NAME,
         transcript_path=str(path),
@@ -314,10 +319,7 @@ def collect(session_id: str) -> dict:
         instructions=dict(s.instructions) if config_known else None,
         skills=dict(sorted(s.skills.items())) if config_known else None,
         mcp_servers=mcp_servers_field(s.mcp_calls, s.mcp_definitions),
-        tokens=dict(s.tokens),
-        cost={k: round(v, 6) for k, v in s.cost.items()},
-        aux_usage={
-            "tokens": dict(s.aux_tokens),
-            "cost": {k: round(v, 6) for k, v in s.aux_cost.items()},
-        },
+        tokens=to_tokens(s.tokens),
+        cost=to_cost(s.cost),
+        aux_usage=AuxUsage(tokens=to_tokens(s.aux_tokens), cost=to_cost(s.aux_cost)),
     )

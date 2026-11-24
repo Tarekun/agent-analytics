@@ -58,7 +58,7 @@ def main(argv: list[str] | None = None) -> int:
         store.save_record(path, record)
         print(f"recorded {harness.NAME}:{session_id} -> {path}", file=sys.stderr)
 
-    print(json.dumps(record, indent=2, ensure_ascii=False))
+    print(json.dumps(record.to_dict(), indent=2, ensure_ascii=False))
     return 0
 
 

@@ -1,59 +1,98 @@
 """The common record schema shared by every harness.
 
-Every record has exactly these keys, in this order. A harness that cannot
-provide a field leaves it as None, so records from different harnesses are
+Every harness returns a SessionRecord. Fields without a default must be set by
+every harness (possibly to None when a session lacks the data); fields that
+default to None are ones only some harnesses can provide. Records from
+different harnesses therefore have the same keys, in the same order, and are
 directly comparable.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 from collections import Counter
+from dataclasses import dataclass
 from datetime import datetime
+from typing import Any, Literal, TypedDict
 
-FIELDS: tuple[str, ...] = (
+
+class Tokens(TypedDict):
+    input: int
+    output: int
+    cache_read: int
+    cache_creation: int
+
+
+class Cost(TypedDict):
+    input: float
+    output: float
+    cache_read: float
+    cache_creation: float
+    total: float
+
+
+class AuxUsage(TypedDict):
+    tokens: Tokens
+    cost: Cost
+
+
+class SkillUsage(TypedDict):
+    hashes: list[str]  # one per version of the skill seen in the session
+    invocations: int
+
+
+class McpServerUsage(TypedDict):
+    calls: int
+    tools: dict[str, str | None]  # called tool -> definition hash (None if not in the transcript)
+
+
+class TimeFields(TypedDict):
+    started_at: str | None
+    ended_at: str | None
+    duration_seconds: float | None
+
+
+@dataclass(frozen=True, kw_only=True)
+class SessionRecord:
     # identity
-    "session_id",
-    "harness",
-    "transcript_path",
-    "title",
-    "cwd",
-    "git_branch",              # claude-code only
-    "harness_version",
-    "harness_version_source",  # "transcript" (written by the session) | "installed" (version installed at collection time)
-    "entrypoint",              # claude-code only
-    "session_format_version",  # pi only: on-disk session format version
-    "parent_session",          # pi only: session this one was forked/cloned from
+    session_id: str
+    harness: str
+    transcript_path: str
+    title: str | None
+    cwd: str | None
+    git_branch: str | None = None              # claude-code only
+    harness_version: str | None
+    # "transcript" (written by the session) | "installed" (version installed at collection time)
+    harness_version_source: Literal["transcript", "installed"] | None
+    entrypoint: str | None = None              # claude-code only
+    session_format_version: int | None = None  # pi only: on-disk session format version
+    parent_session: str | None = None          # pi only: session this one was forked/cloned from
     # time
-    "started_at",
-    "ended_at",
-    "duration_seconds",
+    started_at: str | None
+    ended_at: str | None
+    duration_seconds: float | None
     # activity
-    "user_prompts",
-    "assistant_messages",
-    "tool_calls_total",
-    "tool_calls",
-    "tool_errors",
-    "models",
-    "providers",               # pi only: {provider: assistant message count}
-    # config the session ran with
-    "effort",                  # {thinking effort level: assistant message count}
-    "instructions",            # {instruction file path: [content hash, ...]} (several if edited mid-session)
-    "skills",                  # {invoked skill: {"hashes": [...], "invocations": n}}
-    "mcp_servers",             # {server: {"calls": n, "tools": {called tool: definition hash}}}
+    user_prompts: int
+    assistant_messages: int
+    tool_calls_total: int
+    tool_calls: dict[str, int]
+    tool_errors: int
+    models: dict[str, int]
+    providers: dict[str, int] | None = None    # pi only: {provider: assistant message count}
+    # config the session ran with; None when the harness can't tell, {} when nothing was used
+    effort: dict[str, int]                     # {thinking effort level: assistant message count}
+    instructions: dict[str, list[str]] | None  # {file path: [content hash, ...]} (several if edited mid-session)
+    skills: dict[str, SkillUsage] | None       # invoked skills only
+    mcp_servers: dict[str, McpServerUsage]     # servers with at least one call
     # usage of the main model calls
-    "tokens",                  # {input, output, cache_read, cache_creation}
-    "cost",                    # pi only: {input, output, cache_read, cache_creation, total}
-    "aux_usage",               # pi only: usage outside the main model calls (compaction, branch summaries, tools, ...)
-)
+    tokens: Tokens
+    cost: Cost | None = None                   # pi only
+    aux_usage: AuxUsage | None = None          # pi only: usage outside the main model calls
 
-
-def new_record(**values) -> dict:
-    unknown = set(values) - set(FIELDS)
-    if unknown:
-        raise KeyError(f"unknown record fields: {sorted(unknown)}")
-    return {field: values.get(field) for field in FIELDS}
+    def to_dict(self) -> dict[str, Any]:
+        return dataclasses.asdict(self)
 
 
 def content_hash(value) -> str:
@@ -78,7 +117,7 @@ def tool_definition_hash(name, description, input_schema) -> str:
     return content_hash({"name": name, "description": description, "input_schema": input_schema})
 
 
-def mcp_servers_field(calls: dict[str, Counter], definitions: dict[str, str]) -> dict:
+def mcp_servers_field(calls: dict[str, Counter], definitions: dict[str, str]) -> dict[str, McpServerUsage]:
     """The mcp_servers field from {server: {tool: calls}} and {full tool name: definition hash}."""
     return {
         server: {
@@ -87,6 +126,20 @@ def mcp_servers_field(calls: dict[str, Counter], definitions: dict[str, str]) ->
         }
         for server, tools in sorted(calls.items())
     }
+
+
+def to_tokens(c: Counter) -> Tokens:
+    return Tokens(input=c["input"], output=c["output"], cache_read=c["cache_read"], cache_creation=c["cache_creation"])
+
+
+def to_cost(c: Counter) -> Cost:
+    return Cost(
+        input=round(c["input"], 6),
+        output=round(c["output"], 6),
+        cache_read=round(c["cache_read"], 6),
+        cache_creation=round(c["cache_creation"], 6),
+        total=round(c["total"], 6),
+    )
 
 
 def parse_ts(value) -> datetime | None:
@@ -98,7 +151,7 @@ def parse_ts(value) -> datetime | None:
         return None
 
 
-def time_fields(timestamps: list[datetime]) -> dict:
+def time_fields(timestamps: list[datetime]) -> TimeFields:
     if not timestamps:
         return {"started_at": None, "ended_at": None, "duration_seconds": None}
     start, end = min(timestamps), max(timestamps)

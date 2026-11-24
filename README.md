@@ -22,7 +22,7 @@ Without installing run with: `uv run agent-analytics ...`.
 Records are upserted into `~/.agent-analytics/sessions.json` (override with
 `--db` or `$AGENT_ANALYTICS_DB`), keyed by `<harness>:<session_id>`.
 
-Every record has the same keys regardless of harness (see `src/agent_analytics/record.py`);
+Every record has the same keys regardless of harness (`SessionRecord` in `src/agent_analytics/record.py`);
 fields a harness can't provide are `null`.
 
 | field | claude-code | pi |
@@ -89,8 +89,8 @@ The pi parser was written from pi's documented format and tested against synthet
 sessions. The config snapshot was also checked against real pi 1.4.0 sessions.
 
 To add a harness, create a module in `src/agent_analytics/harnesses/` exposing
-`NAME`, `find_latest_session()` and `collect(session_id)` (build the result with
-`record.new_record`), and register it in `harnesses/__init__.py`.
+`NAME`, `find_latest_session()` and `collect(session_id)` returning a
+`record.SessionRecord`, and register it in `harnesses/__init__.py`.
 
 ## Tests
 

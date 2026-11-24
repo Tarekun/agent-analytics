@@ -8,7 +8,11 @@ import pytest
 
 from agent_analytics.cli import main
 from agent_analytics.harnesses import pi
-from agent_analytics.record import FIELDS, content_hash, tool_definition_hash
+from dataclasses import fields
+
+from agent_analytics.record import SessionRecord, content_hash, tool_definition_hash
+
+FIELDS = [f.name for f in fields(SessionRecord)]
 
 SID = "0b6f7a2e-1111-2222-3333-444455556666"
 
@@ -77,7 +81,7 @@ def test_pi_latest_session(pi_env, tmp_path, capsys):
     assert main(["-H", "pi", "--db", str(db)]) == 0
     rec = json.loads(db.read_text())["sessions"][f"pi:{SID}"]
 
-    assert list(rec)[: len(FIELDS)] == list(FIELDS)
+    assert list(rec)[: len(FIELDS)] == FIELDS
     assert rec["title"] == "Bug hunt"
     assert rec["cwd"] == "/proj"
     assert rec["harness_version"] == "1.6.0" and rec["harness_version_source"] == "installed"
@@ -109,7 +113,7 @@ def test_pi_without_pi_installed(pi_env, tmp_path, monkeypatch):
     monkeypatch.setenv("PATH", "/nonexistent")
     pi.installed_version.cache_clear()
     rec = pi.collect(SID)
-    assert rec["harness_version"] is None and rec["harness_version_source"] is None
+    assert rec.harness_version is None and rec.harness_version_source is None
 
 
 SKILL_BODY = "# Dev\n\nDevelop the issue."
@@ -184,21 +188,21 @@ def test_pi_config_snapshot(pi_env):
     write_session(pi_env, SID, 1_000, CONFIG_LINES)
     rec = pi.collect(SID)
 
-    assert rec["instructions"] == {"/proj/AGENTS.md": [content_hash("rule v1"), content_hash("rule v2")]}
+    assert rec.instructions == {"/proj/AGENTS.md": [content_hash("rule v1"), content_hash("rule v2")]}
     # the hash covers the instructions without frontmatter, as in claude-code
-    assert rec["skills"] == {"dev": {"hashes": [content_hash(SKILL_BODY)], "invocations": 2}}
-    assert rec["mcp_servers"] == {
+    assert rec.skills == {"dev": {"hashes": [content_hash(SKILL_BODY)], "invocations": 2}}
+    assert rec.mcp_servers == {
         "docs": {"calls": 2, "tools": {"fetch": tool_definition_hash("mcp__docs__fetch", "Fetch a page", {"type": "object"})}},
         "tracker": {"calls": 1, "tools": {"list": None}},
     }
-    assert rec["tool_calls"]["read"] == 4 and rec["user_prompts"] == 1
+    assert rec.tool_calls["read"] == 4 and rec.user_prompts == 1
 
 
 def test_pi_session_without_config_used(pi_env):
     lines = [CONFIG_LINES[0], msg("s1", {"role": "system", "content": "", "sections": {"preamble": "..."}})]
     write_session(pi_env, SID, 1_000, lines)
     rec = pi.collect(SID)
-    assert rec["instructions"] == {} and rec["skills"] == {} and rec["mcp_servers"] == {}
+    assert rec.instructions == {} and rec.skills == {} and rec.mcp_servers == {}
 
 
 def test_claude_code_has_pi_fields_as_null(tmp_path, monkeypatch):
@@ -208,7 +212,6 @@ def test_claude_code_has_pi_fields_as_null(tmp_path, monkeypatch):
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
     _write_session(tmp_path, "-proj", "s", 1_000)
     rec = claude_code.collect("s")
-    assert list(rec) == list(FIELDS)
-    for field in ("providers", "cost", "aux_usage", "session_format_version", "parent_session"):
-        assert rec[field] is None
-    assert rec["harness_version_source"] is None  # fixture has no version
+    for name in ("providers", "cost", "aux_usage", "session_format_version", "parent_session"):
+        assert getattr(rec, name) is None
+    assert rec.harness_version_source is None  # fixture has no version

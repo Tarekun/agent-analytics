@@ -7,6 +7,8 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
+from agent_analytics.record import SessionRecord
+
 DEFAULT_DB = Path.home() / ".agent-analytics" / "sessions.json"
 
 
@@ -23,10 +25,10 @@ def load(path: Path) -> dict:
     return data
 
 
-def save_record(path: Path, record: dict) -> None:
+def save_record(path: Path, record: SessionRecord) -> None:
     data = load(path)
-    record = {**record, "recorded_at": datetime.now(timezone.utc).isoformat()}
-    data["sessions"][f"{record['harness']}:{record['session_id']}"] = record
+    entry = {**record.to_dict(), "recorded_at": datetime.now(timezone.utc).isoformat()}
+    data["sessions"][f"{record.harness}:{record.session_id}"] = entry
 
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")

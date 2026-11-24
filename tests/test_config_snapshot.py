@@ -68,18 +68,18 @@ def test_config_snapshot(tmp_path, monkeypatch):
 
     rec = claude_code.collect("s")
 
-    assert rec["effort"] == {"high": 2, "medium": 1}
-    assert rec["instructions"] == {"/proj/AGENTS.md": [content_hash("rule v1"), content_hash("rule v2")]}
+    assert rec.effort == {"high": 2, "medium": 1}
+    assert rec.instructions == {"/proj/AGENTS.md": [content_hash("rule v1"), content_hash("rule v2")]}
     # both invocations have the same hash: the arguments are not part of it
-    assert rec["skills"] == {"review": {"hashes": [content_hash(SKILL_TEXT)], "invocations": 2}}
-    assert rec["mcp_servers"] == {
+    assert rec.skills == {"review": {"hashes": [content_hash(SKILL_TEXT)], "invocations": 2}}
+    assert rec.mcp_servers == {
         "docs": {"calls": 2, "tools": {"fetch": content_hash(FETCH_DEF)}},
         "tracker": {"calls": 1, "tools": {"list": None}},
     }
-    assert rec["user_prompts"] == 1  # the skill loads are not prompts
+    assert rec.user_prompts == 1  # the skill loads are not prompts
 
 
 def test_no_config_used_gives_empty_values(tmp_path, monkeypatch):
     _write_transcript(tmp_path, monkeypatch, [user("hi")])
     rec = claude_code.collect("s")
-    assert rec["skills"] == {} and rec["mcp_servers"] == {} and rec["instructions"] == {} and rec["effort"] == {}
+    assert rec.skills == {} and rec.mcp_servers == {} and rec.instructions == {} and rec.effort == {}

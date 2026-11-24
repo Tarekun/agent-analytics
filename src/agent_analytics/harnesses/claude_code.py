@@ -19,11 +19,13 @@ from agent_analytics.errors import SessionNotFound
 from agent_analytics.record import (
     add_unique,
     content_hash,
+    SessionRecord,
+    SkillUsage,
     mcp_servers_field,
-    new_record,
     parse_ts,
     split_mcp_tool,
     time_fields,
+    to_tokens,
     tool_definition_hash,
 )
 
@@ -123,7 +125,7 @@ class _Session:
     effort: Counter = field(default_factory=Counter)
     tokens: Counter = field(default_factory=lambda: Counter(input=0, output=0, cache_read=0, cache_creation=0))
     instructions: dict[str, list[str]] = field(default_factory=lambda: defaultdict(list))
-    skills: dict[str, dict] = field(default_factory=dict)
+    skills: dict[str, SkillUsage] = field(default_factory=dict)
     mcp_calls: dict[str, Counter] = field(default_factory=lambda: defaultdict(Counter))  # server -> {tool: calls}
     mcp_definitions: dict[str, str] = field(default_factory=dict)  # full tool name -> definition hash
     seen_message_ids: set[str] = field(default_factory=set)
@@ -165,7 +167,7 @@ class _Session:
             self.user_prompts += 1
         if loaded := _skill_load(entry):
             name, skill_hash = loaded
-            skill = self.skills.setdefault(name, {"hashes": [], "invocations": 0})
+            skill = self.skills.setdefault(name, SkillUsage(hashes=[], invocations=0))
             skill["invocations"] += 1
             add_unique(skill["hashes"], skill_hash)
         content = (entry.get("message") or {}).get("content")
@@ -189,9 +191,10 @@ class _Session:
         # same message id (one per content block) and repeat the same usage and
         # metadata, so count those once per message id.
         msg_id = message.get("id") or entry.get("requestId") or entry.get("uuid")
-        if msg_id in self.seen_message_ids:
-            return
-        self.seen_message_ids.add(msg_id)
+        if msg_id:
+            if msg_id in self.seen_message_ids:
+                return
+            self.seen_message_ids.add(msg_id)
         self.assistant_messages += 1
         if model := message.get("model"):
             self.models[model] += 1
@@ -205,14 +208,14 @@ class _Session:
 
 
 
-def collect(session_id: str) -> dict:
+def collect(session_id: str) -> SessionRecord:
     path = find_transcript(session_id)
 
     s = _Session()
     for entry in _read_entries(path):
         s.add(entry)
 
-    return new_record(
+    return SessionRecord(
         session_id=session_id,
         harness=NAME,
         transcript_path=str(path),
@@ -233,5 +236,5 @@ def collect(session_id: str) -> dict:
         instructions=dict(s.instructions),
         skills=dict(sorted(s.skills.items())),
         mcp_servers=mcp_servers_field(s.mcp_calls, s.mcp_definitions),
-        tokens=dict(s.tokens),
+        tokens=to_tokens(s.tokens),
     )
