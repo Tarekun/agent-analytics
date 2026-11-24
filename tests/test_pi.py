@@ -8,7 +8,7 @@ import pytest
 
 from agent_analytics.cli import main
 from agent_analytics.harnesses import pi
-from agent_analytics.record import FIELDS
+from agent_analytics.record import FIELDS, content_hash, tool_definition_hash
 
 SID = "0b6f7a2e-1111-2222-3333-444455556666"
 
@@ -88,7 +88,8 @@ def test_pi_latest_session(pi_env, tmp_path, capsys):
     assert rec["tool_calls"] == {"bash": 1} and rec["tool_errors"] == 1
     assert rec["models"] == {"claude-x": 2} and rec["providers"] == {"anthropic": 2}
     assert rec["effort"] == {"medium": 1, "high": 1}
-    assert rec["instructions"] is None and rec["skills"] is None and rec["mcp_servers"] is None
+    # no system message: what was loaded is unknown, but MCP calls would still be visible
+    assert rec["instructions"] is None and rec["skills"] is None and rec["mcp_servers"] == {}
     assert rec["tokens"] == {"input": 110, "output": 25, "cache_read": 50, "cache_creation": 0}
     assert rec["cost"]["total"] == pytest.approx(0.012)
     assert rec["aux_usage"]["tokens"]["input"] == 47  # tool result (7) + compaction (40)
@@ -109,6 +110,95 @@ def test_pi_without_pi_installed(pi_env, tmp_path, monkeypatch):
     pi.installed_version.cache_clear()
     rec = pi.collect(SID)
     assert rec["harness_version"] is None and rec["harness_version_source"] is None
+
+
+SKILL_BODY = "# Dev\n\nDevelop the issue."
+SKILL_FILE = f"---\nname: dev\ndescription: Develop an issue\n---\n\n{SKILL_BODY}\n"
+SKILLS_SECTION = """<skills>
+The following skills provide specialized instructions for specific tasks.
+
+<available_skills>
+  <skill>
+    <name>dev</name>
+    <description>Develop an issue</description>
+    <location>/proj/.agents/skills/dev/SKILL.md</location>
+  </skill>
+</available_skills>
+</skills>"""
+FETCH_TOOL = {"name": "mcp__docs__fetch", "description": "Fetch a page", "parameters": {"type": "object"}}
+
+
+def instructions_section(text):
+    return ("<project_context>\nProject-specific instructions and guidelines:\n\n"
+            f'<project_instructions path="/proj/AGENTS.md">\n{text}\n\n</project_instructions>\n</project_context>')
+
+
+def msg(i, message):
+    return {"type": "message", "id": i, "parentId": None, "timestamp": "2026-01-01T10:00:00.000Z", "message": message}
+
+
+def read_call(i, call_id, path, **extra):
+    return msg(i, {"role": "assistant", "model": "m", "content": [
+        {"type": "toolCall", "id": call_id, "name": "read", "arguments": {"path": path, **extra}}]})
+
+
+def read_result(i, call_id, text, is_error=False):
+    return msg(i, {"role": "toolResult", "toolCallId": call_id, "toolName": "read", "isError": is_error,
+                   "content": [{"type": "text", "text": text}]})
+
+
+CONFIG_LINES = [
+    {"type": "session", "version": 3, "id": SID, "timestamp": "2026-01-01T10:00:00.000Z", "cwd": "/proj"},
+    msg("s1", {"role": "system", "content": "", "toolsAdded": [{"name": "read"}, FETCH_TOOL],
+               "sections": {"preamble": "...", "project_context": instructions_section("rule v1"),
+                            "skills": SKILLS_SECTION}}),
+    # the model loads the skill: full read, relative to cwd
+    read_call("r1", "c1", ".agents/skills/dev/SKILL.md"),
+    read_result("r2", "c1", SKILL_FILE),
+    # not loads: a partial re-read, a failed read, a SKILL.md the session did not offer
+    read_call("r3", "c2", "/proj/.agents/skills/dev/SKILL.md", offset=3, limit=2),
+    read_result("r4", "c2", "Develop the issue."),
+    read_call("r5", "c3", "/proj/.agents/skills/dev/SKILL.md"),
+    read_result("r6", "c3", "ENOENT", is_error=True),
+    read_call("r7", "c4", "/elsewhere/skills/other/SKILL.md"),
+    read_result("r8", "c4", SKILL_FILE),
+    # the user types /skill:dev with arguments: same skill text, same hash
+    msg("u1", {"role": "user", "content": [{"type": "text", "text":
+        '<skill name="dev" location="/proj/.agents/skills/dev/SKILL.md">\n'
+        f"References are relative to /proj/.agents/skills/dev.\n\n{SKILL_BODY}\n</skill>\n\nimplement #12"}]}),
+    # MCP: one direct call, two calls from a codemode script (one to a tool never declared)
+    msg("a1", {"role": "assistant", "model": "m", "content": [
+        {"type": "toolCall", "id": "c5", "name": "mcp__docs__fetch", "arguments": {}},
+        {"type": "toolCall", "id": "c6", "name": "codemode", "arguments": {"code": "..."}}]}),
+    msg("t5", {"role": "toolResult", "toolCallId": "c5", "toolName": "mcp__docs__fetch", "isError": False, "content": []}),
+    msg("t6", {"role": "toolResult", "toolCallId": "c6", "toolName": "codemode", "isError": False, "content": [],
+               "nestedCalls": [{"id": "n1", "name": "mcp__docs__fetch", "status": "ok"},
+                               {"id": "n2", "name": "mcp__tracker__list", "status": "ok"},
+                               {"id": "n3", "name": "bash", "status": "ok"}]}),
+    # AGENTS.md edited mid-session: a later system message patches only that section
+    msg("s2", {"role": "system", "content": "", "sections": {"project_context": instructions_section("rule v2")}}),
+]
+
+
+def test_pi_config_snapshot(pi_env):
+    write_session(pi_env, SID, 1_000, CONFIG_LINES)
+    rec = pi.collect(SID)
+
+    assert rec["instructions"] == {"/proj/AGENTS.md": [content_hash("rule v1"), content_hash("rule v2")]}
+    # the hash covers the instructions without frontmatter, as in claude-code
+    assert rec["skills"] == {"dev": {"hashes": [content_hash(SKILL_BODY)], "invocations": 2}}
+    assert rec["mcp_servers"] == {
+        "docs": {"calls": 2, "tools": {"fetch": tool_definition_hash("mcp__docs__fetch", "Fetch a page", {"type": "object"})}},
+        "tracker": {"calls": 1, "tools": {"list": None}},
+    }
+    assert rec["tool_calls"]["read"] == 4 and rec["user_prompts"] == 1
+
+
+def test_pi_session_without_config_used(pi_env):
+    lines = [CONFIG_LINES[0], msg("s1", {"role": "system", "content": "", "sections": {"preamble": "..."}})]
+    write_session(pi_env, SID, 1_000, lines)
+    rec = pi.collect(SID)
+    assert rec["instructions"] == {} and rec["skills"] == {} and rec["mcp_servers"] == {}
 
 
 def test_claude_code_has_pi_fields_as_null(tmp_path, monkeypatch):

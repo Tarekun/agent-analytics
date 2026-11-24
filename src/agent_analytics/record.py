@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections import Counter
 from datetime import datetime
 
 FIELDS: tuple[str, ...] = (
@@ -38,9 +39,9 @@ FIELDS: tuple[str, ...] = (
     "providers",               # pi only: {provider: assistant message count}
     # config the session ran with
     "effort",                  # {thinking effort level: assistant message count}
-    "instructions",            # claude-code only: {instruction file path: [content hash, ...]} (several if edited mid-session)
-    "skills",                  # claude-code only: {invoked skill: {"hashes": [...], "invocations": n}}
-    "mcp_servers",             # claude-code only: {server: {"calls": n, "tools": {called tool: definition hash}}}
+    "instructions",            # {instruction file path: [content hash, ...]} (several if edited mid-session)
+    "skills",                  # {invoked skill: {"hashes": [...], "invocations": n}}
+    "mcp_servers",             # {server: {"calls": n, "tools": {called tool: definition hash}}}
     # usage of the main model calls
     "tokens",                  # {input, output, cache_read, cache_creation}
     "cost",                    # pi only: {input, output, cache_read, cache_creation, total}
@@ -59,6 +60,33 @@ def content_hash(value) -> str:
     """Short, stable hash of a string or a JSON-serialisable value."""
     text = value if isinstance(value, str) else json.dumps(value, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
+
+
+def add_unique(items: list[str], item: str) -> None:
+    if item not in items:
+        items.append(item)
+
+
+def split_mcp_tool(tool_name: str) -> tuple[str, str] | None:
+    """Split "mcp__<server>__<tool>" into (server, tool)."""
+    parts = tool_name.split("__", 2)
+    return (parts[1], parts[2]) if len(parts) == 3 and parts[0] == "mcp" and parts[1] and parts[2] else None
+
+
+def tool_definition_hash(name, description, input_schema) -> str:
+    """Hash of a tool definition as the model received it, the same for every harness."""
+    return content_hash({"name": name, "description": description, "input_schema": input_schema})
+
+
+def mcp_servers_field(calls: dict[str, Counter], definitions: dict[str, str]) -> dict:
+    """The mcp_servers field from {server: {tool: calls}} and {full tool name: definition hash}."""
+    return {
+        server: {
+            "calls": sum(tools.values()),
+            "tools": {tool: definitions.get(f"mcp__{server}__{tool}") for tool in sorted(tools)},
+        }
+        for server, tools in sorted(calls.items())
+    }
 
 
 def parse_ts(value) -> datetime | None:

@@ -16,7 +16,16 @@ from datetime import datetime
 from pathlib import Path
 
 from agent_analytics.errors import SessionNotFound
-from agent_analytics.record import content_hash, new_record, parse_ts, time_fields
+from agent_analytics.record import (
+    add_unique,
+    content_hash,
+    mcp_servers_field,
+    new_record,
+    parse_ts,
+    split_mcp_tool,
+    time_fields,
+    tool_definition_hash,
+)
 
 NAME = "claude-code"
 
@@ -77,12 +86,6 @@ def _skill_load(entry: dict) -> tuple[str, str] | None:
     return name, content_hash(body)
 
 
-def _mcp_server(tool_name: str) -> tuple[str, str] | None:
-    """Split "mcp__<server>__<tool>" into (server, tool)."""
-    parts = tool_name.split("__", 2)
-    return (parts[1], parts[2]) if len(parts) == 3 and parts[0] == "mcp" else None
-
-
 def _is_human_prompt(entry: dict) -> bool:
     """A user entry typed by a person (not a tool result or meta message)."""
     if entry.get("isMeta") or entry.get("isSidechain"):
@@ -104,11 +107,6 @@ def _read_entries(path: Path):
                 continue
             if isinstance(entry, dict):
                 yield entry
-
-
-def _add_unique(items: list[str], item: str) -> None:
-    if item not in items:
-        items.append(item)
 
 
 @dataclass
@@ -153,15 +151,14 @@ class _Session:
         if attachment.get("type") == "instructions":
             for f in attachment.get("files") or []:
                 if f.get("path"):
-                    _add_unique(self.instructions[f["path"]], content_hash(f.get("content") or ""))
+                    add_unique(self.instructions[f["path"]], content_hash((f.get("content") or "").strip()))
 
     def _request_shape(self, shape: dict) -> None:
         # The tool definitions sent to the model. MCP tools appear here once loaded.
         for tool in shape.get("tools") or []:
             name = tool.get("name") or ""
-            if _mcp_server(name):
-                definition = {k: tool.get(k) for k in ("name", "description", "input_schema")}
-                self.mcp_definitions[name] = content_hash(definition)
+            if split_mcp_tool(name):
+                self.mcp_definitions[name] = tool_definition_hash(name, tool.get("description"), tool.get("input_schema"))
 
     def _user(self, entry: dict) -> None:
         if _is_human_prompt(entry):
@@ -170,7 +167,7 @@ class _Session:
             name, skill_hash = loaded
             skill = self.skills.setdefault(name, {"hashes": [], "invocations": 0})
             skill["invocations"] += 1
-            _add_unique(skill["hashes"], skill_hash)
+            add_unique(skill["hashes"], skill_hash)
         content = (entry.get("message") or {}).get("content")
         if isinstance(content, list):
             self.tool_errors += sum(
@@ -184,7 +181,7 @@ class _Session:
             if isinstance(block, dict) and block.get("type") == "tool_use":
                 name = block.get("name", "?")
                 self.tool_calls[name] += 1
-                if mcp := _mcp_server(name):
+                if mcp := split_mcp_tool(name):
                     server, tool = mcp
                     self.mcp_calls[server][tool] += 1
 
@@ -206,14 +203,6 @@ class _Session:
         self.tokens["cache_read"] += usage.get("cache_read_input_tokens") or 0
         self.tokens["cache_creation"] += usage.get("cache_creation_input_tokens") or 0
 
-    def mcp_servers(self) -> dict:
-        return {
-            server: {
-                "calls": sum(tools.values()),
-                "tools": {tool: self.mcp_definitions.get(f"mcp__{server}__{tool}") for tool in sorted(tools)},
-            }
-            for server, tools in sorted(self.mcp_calls.items())
-        }
 
 
 def collect(session_id: str) -> dict:
@@ -243,6 +232,6 @@ def collect(session_id: str) -> dict:
         effort=dict(s.effort.most_common()),
         instructions=dict(s.instructions),
         skills=dict(sorted(s.skills.items())),
-        mcp_servers=s.mcp_servers(),
+        mcp_servers=mcp_servers_field(s.mcp_calls, s.mcp_definitions),
         tokens=dict(s.tokens),
     )

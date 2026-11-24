@@ -41,29 +41,39 @@ fields a harness can't provide are `null`.
 | cost (main model calls) | `null` | ✅ |
 | aux_usage (compaction, branch summaries, nested tool calls, …) | `null` | ✅ |
 | effort (thinking level → assistant messages) | ✅ | ✅ (`thinkingLevel`) |
-| instructions | ✅ | `null` |
-| skills (invoked only) | ✅ | `null` |
-| mcp_servers (servers with at least one call) | ✅ | `null` |
+| instructions | ✅ | ✅ |
+| skills (invoked only) | ✅ | ✅ |
+| mcp_servers (servers with at least one call) | ✅ | ✅ (also calls made from `codemode` scripts) |
 
 `{}` means the harness records the field but the session used none of it; `null` means
-the harness can't provide it.
+the harness can't provide it. Pi sessions written before Pi recorded system messages have
+`null` instructions and skills.
 
 ### Config snapshot
 
 All hashes are the first 12 hex characters of a SHA-256 and come from the transcript,
-so they describe exactly what the model received, also for old sessions.
+so they describe exactly what the model received, also for old sessions. Hashes are
+computed the same way in every harness, so a file, skill or tool definition that reaches
+the model unchanged has the same hash in Claude Code and Pi.
 
 - **instructions**: `{path: [hash, ...]}` of each instruction file (CLAUDE.md, AGENTS.md, …)
-  loaded in the session. Several hashes mean the file changed during the session.
-- **skills**: `{name: {"hashes": [...], "invocations": n}}` for each skill loaded by a
-  `Skill` tool call or a typed `/<skill>`. The hash covers the skill text without the
-  arguments, so it changes only when the skill changes. Supporting files in the skill
-  directory are not part of the hash.
+  loaded in the session, hashed without leading and trailing whitespace. Several hashes
+  mean the file changed during the session.
+- **skills**: `{name: {"hashes": [...], "invocations": n}}` for each skill loaded in the
+  session. The hash covers the skill instructions without frontmatter and arguments, so it
+  changes only when the skill changes. Supporting files in the skill directory are not
+  part of the hash.
+  - Claude Code: a `Skill` tool call or a typed `/<skill>`.
+  - Pi: the model reading a SKILL.md the session offered (a full `read`; a partial re-read
+    with `offset`/`limit` is not a load), or a typed `/skill:<name>`. Reading a SKILL.md
+    to edit it also counts, since the transcript can't tell the two apart.
 - **mcp_servers**: `{server: {"calls": n, "tools": {tool: hash}}}` for each server with at
   least one call. Each called tool gets the hash of its definition (name, description,
   input schema). A tool is hashed separately because the model receives only the tools
   it loaded, so a hash over the whole server would change with what was loaded.
-  The hash is `null` when the definition is not in the transcript.
+  The hash is `null` when the definition is not in the transcript, which in Pi is the
+  case for tools called only from `codemode` scripts: their definitions are never
+  declared to the model.
 
 ## Harnesses
 
@@ -76,7 +86,7 @@ so they describe exactly what the model received, also for old sessions.
 
 Pi sessions are trees (branches are kept in the same file); all branches are counted.
 The pi parser was written from pi's documented format and tested against synthetic
-sessions, not real ones yet.
+sessions. The config snapshot was also checked against real pi 1.4.0 sessions.
 
 To add a harness, create a module in `src/agent_analytics/harnesses/` exposing
 `NAME`, `find_latest_session()` and `collect(session_id)` (build the result with
