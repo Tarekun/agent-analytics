@@ -7,6 +7,8 @@ directly comparable.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import datetime
 
 FIELDS: tuple[str, ...] = (
@@ -34,6 +36,11 @@ FIELDS: tuple[str, ...] = (
     "tool_errors",
     "models",
     "providers",               # pi only: {provider: assistant message count}
+    # config the session ran with
+    "effort",                  # {thinking effort level: assistant message count}
+    "instructions",            # claude-code only: {instruction file path: [content hash, ...]} (several if edited mid-session)
+    "skills",                  # claude-code only: {invoked skill: {"hashes": [...], "invocations": n}}
+    "mcp_servers",             # claude-code only: {server: {"calls": n, "tools": {called tool: definition hash}}}
     # usage of the main model calls
     "tokens",                  # {input, output, cache_read, cache_creation}
     "cost",                    # pi only: {input, output, cache_read, cache_creation, total}
@@ -46,6 +53,12 @@ def new_record(**values) -> dict:
     if unknown:
         raise KeyError(f"unknown record fields: {sorted(unknown)}")
     return {field: values.get(field) for field in FIELDS}
+
+
+def content_hash(value) -> str:
+    """Short, stable hash of a string or a JSON-serialisable value."""
+    text = value if isinstance(value, str) else json.dumps(value, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
 
 
 def parse_ts(value) -> datetime | None:

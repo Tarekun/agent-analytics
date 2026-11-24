@@ -111,6 +111,8 @@ def collect(session_id: str) -> dict:
     tool_calls: Counter[str] = Counter()
     models: Counter[str] = Counter()
     providers: Counter[str] = Counter()
+    effort: Counter[str] = Counter()
+    thinking_level = None  # last thinking_level_change, for messages that don't carry their own
     tokens = Counter(input=0, output=0, cache_read=0, cache_creation=0)
     cost = Counter(input=0, output=0, cache_read=0, cache_creation=0, total=0)
     aux_tokens = Counter(input=0, output=0, cache_read=0, cache_creation=0)
@@ -133,6 +135,8 @@ def collect(session_id: str) -> dict:
 
             if etype == "session":
                 header = entry
+            elif etype == "thinking_level_change":
+                thinking_level = entry.get("thinkingLevel") or thinking_level
             elif etype == "session_info":
                 title = entry.get("name") or title
             elif etype in ("usage", "compaction", "branch_summary"):
@@ -148,6 +152,8 @@ def collect(session_id: str) -> dict:
                         models[model] += 1
                     if provider := msg.get("provider"):
                         providers[provider] += 1
+                    if level := msg.get("thinkingLevel") or thinking_level:
+                        effort[level] += 1
                     for block in msg.get("content") or []:
                         if isinstance(block, dict) and block.get("type") == "toolCall":
                             tool_calls[block.get("name", "?")] += 1
@@ -177,6 +183,7 @@ def collect(session_id: str) -> dict:
         tool_errors=tool_errors,
         models=dict(models.most_common()),
         providers=dict(providers.most_common()),
+        effort=dict(effort.most_common()),
         tokens=dict(tokens),
         cost={k: round(v, 6) for k, v in cost.items()},
         aux_usage={"tokens": dict(aux_tokens), "cost": {k: round(v, 6) for k, v in aux_cost.items()}},
