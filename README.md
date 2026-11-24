@@ -17,6 +17,34 @@ Without installing run with: `uv run agent-analytics ...`.
 - **stdout**: the recorded session as JSON.
 - **stderr**: human messages / errors. Exit codes: `0` ok, `1` session not found, `2` bad arguments.
 
+With `-q/--quiet` nothing is printed and errors are appended to `errors.log`
+next to the store. `-t/--transcript PATH` reads that session file directly.
+
+## Automatic collection (harness setup)
+
+Both integrations call `agent-analytics`, so first put it on PATH:
+
+```bash
+uv tool install --editable .     # installs ~/.local/bin/agent-analytics
+```
+
+**Claude Code**: add the `SessionEnd` hook from
+[`integrations/claude-code/settings.json`](integrations/claude-code/settings.json)
+to `~/.claude/settings.json` (all projects) or a project's `.claude/settings.json`.
+The hook passes its JSON payload on stdin (`--hook-input`). `SessionEnd` hooks get
+only 1.5 s by default; the `"timeout": 30` raises that budget. The hook fires on
+exit, `/clear` and `/resume`, and on SIGTERM; it does not fire on a crash or SIGKILL.
+
+**pi**: link the extension into pi's global extensions folder (auto-discovered):
+
+```bash
+ln -s "$PWD/integrations/pi/agent-analytics.ts" ~/.pi/agent/extensions/agent-analytics.ts
+```
+
+It runs on pi's `session_shutdown` event (quit, and when switching with /new,
+/resume or /fork) and passes the session id and file to the CLI.
+Set `AGENT_ANALYTICS_BIN` if the command is not on pi's PATH.
+
 ## Storage
 
 Records are upserted into `~/.agent-analytics/sessions.json` (override with
